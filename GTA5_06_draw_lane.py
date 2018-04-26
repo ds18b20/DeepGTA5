@@ -6,7 +6,7 @@ import cv2
 import time
 import functools
 import json
-# import pyautogui
+from common.LineFunctions import *
 
 
 def timeit(func):
@@ -20,136 +20,212 @@ def timeit(func):
     return wrapper
 
 
-def roi(img, vertices):
-    mask = np.zeros_like(img)
-    cv2.fillPoly(mask, vertices, 255)
-    masked = cv2.bitwise_and(img, mask)
-    return masked
+def dump_array(array: np.ndarray, fn='dump.txt'):
+    with open(fn, 'w', encoding='utf8') as f:
+        json.dump(array.tolist(), f)
 
 
-def process_img(image):
-    # convert to gray
-    processed_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    # edge detection
-    processed_img = cv2.GaussianBlur(processed_img, (5, 5), 0)
-    processed_img = cv2.Canny(image=processed_img, threshold1=100, threshold2=200)
-
-    vertices = np.array([[[10, 500], [10, 300], [300, 200], [500, 200], [800, 300], [800, 500]], ], np.int32)
-    processed_img = roi(processed_img, vertices=vertices)
-    processed_img = cv2.GaussianBlur(src=processed_img, ksize=(5, 5), sigmaX=0)
-    lines = cv2.HoughLinesP(image=processed_img, rho=1, theta=np.pi/180, threshold=50, lines=np.array([]), minLineLength=100, maxLineGap=5)
-    with open('dump.txt', 'w', encoding='utf8') as f:
-        json.dump(lines.tolist(), f)
-    # print(type(lines))
-    '''
-    [[[534 378 563 406]]
-     [[735 315 773 328]]
-     [[544 386 566 408]]
-     ...
-     [[146 262 161 248]]]
-    '''
-    draw_lines(processed_img, lines)
-    # draw_lanes(processed_img, lines)
-
-    return processed_img
+def load_array(fn='dump.txt'):
+    with open(fn, 'r', encoding='utf8') as f:
+        return np.array(json.load(f))
 
 
-def value_of_line(x, y, line: np.ndarray):
-    delta = 1e-6
-    if line.ndim == 2:
-        line = line[0]
-    if line[3] - line[1] < delta:
-        return y - line[3]
-    elif line[2] - line[0] < delta:
-        return x - line[2]
-    else:
-        return (y - line[1]) / (line[3] - line[1]) - (x - line[0]) / (line[2] - line[0])
+class LaneFinder(object):
+    def __init__(self, bound_box):
+        self.__win_size = bound_box
+        self.__raw_img = np.array(ImageGrab.grab(bbox=self.__win_size))
+        self.__processed_img = self.img_process()
+
+        # self.__lines = self.find_dummy_lines()
+        self.__lines = self.find_lines()
+
+        self.__lanes = self.find_lanes()
+        self.__center = (400, 400)
+
+    def get_lines(self):
+        return self.__lines
+
+    def get_lanes(self):
+        return self.__lanes
+
+    def get_processed_img(self):
+        return self.__processed_img
+
+    def get_center_coordinates(self):
+        return self.__center
+
+    def update(self):
+        self.__raw_img = np.array(ImageGrab.grab(bbox=self.__win_size))
+        self.__processed_img = self.img_process()
+        # self.__lines = self.find_dummy_lines()
+        self.__lines = self.find_lines()
+        self.__lanes = self.find_lanes()
+
+    def roi(self, img, vertices):
+        mask = np.zeros_like(img)
+        cv2.fillPoly(mask, vertices, 255)
+        masked = cv2.bitwise_and(img, mask)
+        return masked
+
+    def img_process(self):
+        # convert to gray
+        temp_img = cv2.cvtColor(self.__raw_img, cv2.COLOR_BGR2GRAY)
+        # blur
+        temp_img = cv2.GaussianBlur(temp_img, ksize=(5, 5), sigmaX=0)
+        # edge detection
+        temp_img = cv2.Canny(temp_img, threshold1=100, threshold2=200)
+        # region of interest
+        vertices = np.array([[[10, 500], [10, 300], [300, 200], [500, 200], [800, 300], [800, 500]], ], np.int32)
+        temp_img = self.roi(temp_img, vertices=vertices)
+        # blur
+        temp_img = cv2.GaussianBlur(src=temp_img, ksize=(5, 5), sigmaX=0)
+
+        return temp_img
+
+    def find_dummy_lines(self):
+        return load_array(fn='dump.txt')
+
+    def find_lines(self):
+        # detect lines
+        temp_lines = cv2.HoughLinesP(image=self.__processed_img,
+                                     rho=1,
+                                     theta=np.pi / 180,
+                                     threshold=50,
+                                     lines=np.array([]),
+                                     minLineLength=75,
+                                     maxLineGap=5)
+        return temp_lines
+
+    def find_lanes(self):
+        # filter lines
+        self.filter_lines()
+        self.group_lines()
+        left_lines, right_lines = self.seperate_lines_lr()
+        return self.get_two_lanes(left_lines, right_lines)
+
+    def filter_lines(self):
+        # lines with slope > 0.25
+        self.__lines = np.array(list(filter(lambda i: abs(slope_of_line(i)) > 0.25, self.__lines)))
+
+    def group_lines(self):
+        lines_stay = self.__lines
+        lane_group = []
+        # count = 0
+        while len(lines_stay) > 0:
+            # if count > 100:
+            #     break
+            # count += 1
+            del_list = []
+            line_temp = lines_stay[0]
+            lines_stay = np.delete(lines_stay, 0, axis=0)
+            for index in range(len(lines_stay)):
+                # print('Count: {}'.format(count-1))
+                # print('Index: {}'.format(index))
+                # print('Diff: {}'.format(line_diff(lines_stay[index], line_temp)))
+                # print('Left: {}'.format(lines_stay))
+                if line_diff(lines_stay[index], line_temp):
+                    del_list.append(index)
+                    line_temp = np.concatenate([line_temp, lines_stay[index]], axis=0)
+            lines_stay = np.delete(lines_stay, del_list, axis=0)
+            lane_group.append(line_temp.reshape(-1, 1, 4))
+        self.__lanes = np.array([np.average(lg, axis=0) for lg in lane_group]).astype(np.int)
+
+    # filter lanes to left and right lanes
+    def seperate_lines_lr(self):
+        # center = self.__CENTER
+        lanes_l = []
+        lanes_r = []
+
+        for lane_lr in self.__lanes:
+            if slope_of_line(lane_lr) > 0:
+                lanes_l.append(lane_lr)
+            elif slope_of_line(lane_lr) < 0:
+                lanes_r.append(lane_lr)
+            else:
+                print('error')
+        return np.array(lanes_l), np.array(lanes_r)
+
+    def get_two_lanes(self, left_lanes, right_lanes):
+        left_sorted_list = sorted(left_lanes, key=self.sorted_key)
+        left_lane_list = left_sorted_list[0]
+
+        right_sorted_list = sorted(right_lanes, key=self.sorted_key)
+        right_lane_list = right_sorted_list[0]
+
+        ret = np.array([left_lane_list, right_lane_list])
+        return ret
+
+    def sorted_key(self, key_x):
+        # return distance_point_line(self.__center, key_x)
+
+        return distance_point_line((400, 400), key_x)
+
+    def draw_lines(self, lines: np.ndarray):
+        # try:
+        #     for line in lines:
+        #         coords = line[0]
+        #         cv2.line(img=img, pt1=(coords[0], coords[1]), pt2=(coords[2], coords[3]), color=(255, 1, 1), thickness=3)
+        # except:
+        #     pass
+        # for index, line in enumerate(self.__lines):
+        for index, line in enumerate(lines):
+            if lines.ndim == 3:
+                line = line[0]
+            cv2.line(img=self.__processed_img, pt1=(line[0], line[1]), pt2=(line[2], line[3]), color=(255, 1, 1),
+                     thickness=3)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(self.__processed_img, str(line), (line[0], line[1] - 10), font, 0.5, (255, 255, 255), 1,
+                        cv2.LINE_AA)
+
+    def draw_text(self, text: str, coordinates: tuple):
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(self.__processed_img, str(text), (coordinates[0], coordinates[1]), font, 2, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+
+    def show_img(self):
+        cv2.imshow('window', self.__processed_img)
 
 
-def line_diff(line: np.ndarray, line_base: np.ndarray):
-    if line.ndim == 2:
-        line = line[0]
-    return value_of_line(line[0], line[1], line_base)**2 + value_of_line(line[2], line[3], line_base)**2
+def dummy_test():
+    window = (0, 40, 800, 640)  # 800*600 from up-left
+    lanes = LaneFinder(window)
+    print('lines here:')
+    dummy_lines = lanes.get_lines()
+    print(dummy_lines)
+
+    print('lanes here:')
+    dummy_lanes = lanes.get_lanes()
+    print(dummy_lanes.shape)
+    print(dummy_lanes)
+
+    print(slope_of_line(np.array([[100, 300, 400, 302]])))
 
 
-def length_of_line(line: np.ndarray):
-    if line.ndim == 2:
-        line = line[0]
-    return ((line[2] - line[0]) ** 2 + (line[3] - line[1]) ** 2) ** (1 / 2)
-
-
-def slope_of_line(line: np.ndarray):
-    delta = 1e-6
-    if line.ndim == 2:
-        line = line[0]
-    return (line[3] - line[1]) / (line[2] - line[0] + delta)
-
-
-def find_lanes(lines: np.ndarray, min_length=100, error=100):
-    min_length = 200
-    lines = np.array(list(filter(lambda x: length_of_line(x) > min_length, lines)))
-
-    line_group = []
-    line_left = np.copy(lines)
-    count = 0
-    while len(line_left) > 0:
-        if count > 1000:
-            break
-        count += 1
-        del_list = []
-
-        line_temp = line_left[0]
-        line_left = np.delete(line_left, 0, axis=0)
-        # print(line_left)
-        for index in range(len(line_left)):
-            # print(count-1, index, line_diff(line_left[index], line_temp))
-            if line_diff(line_left[index], line_temp) < error:
-                del_list.append(index)
-                line_temp = np.concatenate([line_temp, line_left[index]], axis=0)
-        line_left = np.delete(line_left, del_list, axis=0)
-        line_group.append(line_temp.reshape(-1, 1, 4))
-
-    return np.array([np.average(lg, axis=0) for lg in line_group])
-
-
-def draw_lanes(img, lines):
-    temp = find_lanes(lines)
-    print(temp)
-    draw_lines(img, temp.astype(np.int8))
-
-
-def draw_lines(img, lines):
-    # try:
-    #     for line in lines:
-    #         coords = line[0]
-    #         cv2.line(img=img, pt1=(coords[0], coords[1]), pt2=(coords[2], coords[3]), color=(255, 1, 1), thickness=3)
-    # except:
-    #     pass
-
-    for line in lines:
-        coords = line[0]
-        cv2.line(img=img, pt1=(coords[0], coords[1]), pt2=(coords[2], coords[3]), color=(255, 1, 1), thickness=3)
-
-
-def screen_record():
+def run():
+    window = (0, 40, 800, 640)  # 800*600 from up-left
+    lanes = LaneFinder(window)
     while True:
-        last_time = time.time()
-        print_screen = np.array(ImageGrab.grab(bbox=(0, 40, 800, 640)))
-        new_screen = process_img(print_screen)
-        print('Loop takes {} s'.format('%.4f' % (time.time() - last_time)))
+        try:
+            lanes.update()
+        except:
+            pass
+        print('lanes')
+        for lane in lanes.get_lanes():
+            print(lane)
+            lanes.draw_lines(lane)
+            lanes.draw_text('.', lanes.get_center_coordinates())
+            center_x, center_y = lanes.get_center_coordinates()
+            try:
+                feet_x, feet_y = [int(_) for _ in perpendicular_feet(lanes.get_center_coordinates(), lane)]
+                lanes.draw_lines(np.array([[center_x, center_y, feet_x, feet_y]]))
+            except:
+                pass
+        lanes.show_img()
 
-        cv2.imshow('window', new_screen)
         if cv2.waitKey(25) & 0xFF == ord('q'):
             cv2.destroyAllWindows()
             break
 
 
 if __name__ == '__main__':
-    # screen_record_test()
-    screen_record()
-    # print(length_of_line([0, 0, 1, 1]))
-    # a = np.array([[[0, 0, 1, 1]], [[0, 0, 2, 2]], [[0, 0, 3, 3]]])
-    # print(list(find_lane(a)))
-    # print(value_of_line(0, 2, a[0]))
-    # lines = np.array(filter(lambda x: length_of_line(x) > 2, a))
-    # print(lines)
+    run()
