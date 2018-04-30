@@ -27,15 +27,18 @@ def value_of_line(point: tuple, line: np.ndarray):
 
 
 def distance_point_line(point: tuple, line: np.ndarray):
-    if line.ndim == 2:
-        line = line[0]
+    if isinstance(line, np.ndarray):
+        if line.ndim == 2:
+            line = line[0]
+        # 直接tolist的话PyCharm会有警告，需继续研究
+        line = list(line.tolist())
 
-    # vector 1
-    x1, y1 = point[0] - line[0], point[1] - line[1]
-    # vector 2
-    x2, y2 = (line[2] - line[0], line[3] - line[1])
-    assert (x2 ** 2 + y2 ** 2) > 0
-    return abs(x1 * y2 - x2 * y1) / (x2 ** 2 + y2 ** 2) ** (1 / 2)
+        # vector 1
+        x1, y1 = point[0] - line[0], point[1] - line[1]
+        # vector 2
+        x2, y2 = (line[2] - line[0], line[3] - line[1])
+        assert (x2 ** 2 + y2 ** 2) > 0
+        return abs(x1 * y2 - x2 * y1) / (x2 ** 2 + y2 ** 2) ** (1 / 2)
 
 
 def line_diff_old(line: np.ndarray, line_base: np.ndarray):
